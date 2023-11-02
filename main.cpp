@@ -1,17 +1,11 @@
-#include <Arduino.h>
+#include "Arduino.h"
 #include <ArduinoJson.h>
-#include <HardwareSerial.h>
 #include "Audio.h"
 #include "SD.h"
 #include "FS.h"
-#include "driver/i2s.h"
+#include "HardwareSerial.h"
 
-//Peripheral pins
-#define OnboardLED 5
-#define VibraMotor 4
-#define UserSwitch 22
-
-// Audio pins
+// microSD Card Reader connections
 #define I2S_DOUT 26
 #define I2S_BCLK 27
 #define I2S_LRC 14
@@ -22,30 +16,52 @@
 #define SPI_MISO 19
 #define SPI_MOSI 23
 
-// EC200 PINS
-#define EC_PWR 33
-#define EC_RST 32
 #define EC_RX 16
 #define EC_TX 17
 
-//private function declare
-void receiveATCommand();
-void playFile(const char *filename, unsigned long duration);
-void sendATCommand(String command);
+//peripheral devices
+#define UserSwitch 22
+#define VibraMotor 4
+#define OnboardLED 5
 
 HardwareSerial LTE_Serial(2);
 Audio audio;
-unsigned long audioStartTime = 0;
-unsigned long audioDuration = 0;
+
+const String DEVICE_ID = "1";
+
+unsigned long startTime = 0;
+unsigned int duration = 0;
 unsigned int mainFlag = 0;
+unsigned long flagChangeTime = 0;
+
+unsigned long previousMillis = 0;
+const long interval = 1000; // Interval in milliseconds (1 second)
+
+int buttonState = HIGH;     // the current reading from the input pin
+int lastButtonState = HIGH; // the previous reading from the input pin
+int buttonCount = 0;        // counter for the number of button presses
 char findJson[400];
 
-void playFile(const char *filename, unsigned long duration)
+void receiveATCommand(int flag);
+void playFile(const char *filename, unsigned long duration);
+void sendATCommand(String command);
+
+void vibrate(uint8_t pin, long interval)
 {
-  audio.connecttoFS(SD, filename);
-  audioStartTime = millis();
-  audioDuration = duration;
-  Serial.print("Trying to play song");
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval)
+  {
+    previousMillis = currentMillis;
+    if (digitalRead(pin) == HIGH)
+    {
+      digitalWrite(pin, LOW);
+    }
+    else
+    {
+      digitalWrite(pin, HIGH);
+    }
+  }
 }
 
 void sendATCommand(String command)
@@ -58,6 +74,20 @@ void sendATCommand(String command)
 const char *parseResponse(const char *response)
 {
   const char *jsonStart = strchr(response, '{');
+
+  if (jsonStart)
+  {
+    return jsonStart;
+  }
+  else
+  {
+    return nullptr;
+  }
+}
+
+const char *parseLOCResponse(const char *response)
+{
+  const char *jsonStart = strchr(response, ':') + 1;
 
   if (jsonStart)
   {
@@ -103,9 +133,77 @@ String processJsonMessage(const char *jsonString)
   return "";
 }
 
+void checkLOC()
+{
+  sendATCommand("AT+QGPS=1,30,50,1,300");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSLOC=0");
+  delay(1000);
+  receiveATCommand(3);
+  delay(500);
+  sendATCommand("AT+QGPSEND");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+}
+
+void Publish_Message(const char *jsonString)
+{
+  String output="";
+  StaticJsonDocument<96> doc;
+  //          <UTC time> <ddmm.mmmm>  <ddmm,mmmm> <HDOP> <altitude>                  <date>
+  //+QGPSLOC: 061951.000, 3150.7223N, 11711.9293E, 0.7,    62.2,   2,000.00,0.0,0.0, 110513, 09
+  String Lat = "";
+  String Long = "";
+  
+  while (*jsonString != ',')
+  {
+    Lat = Lat + *jsonString;
+    jsonString++;
+  }
+  jsonString++;
+  while (*jsonString != ',')
+  {
+    Long = Long + *jsonString;
+    jsonString++;
+  }
+  doc["DEVICE_ID"] = DEVICE_ID;
+  doc["LAT"] = Lat;
+  doc["LONG"] = Long;
+
+  serializeJson(doc, output);
+  int payloadSize = output.length();
+
+  sendATCommand("AT+QMTPUBEX=0,1,1,0,\"AWS/CIER/INFO/1\"," + String(payloadSize));
+  delay(500);
+  sendATCommand(output);
+  delay(2000);
+  receiveATCommand(0);
+}
+
+void Publish_LIVE_NOW()
+{
+  String output = "";
+  StaticJsonDocument<96> doc;
+
+  doc["DEVICE_ID"] = DEVICE_ID;
+  doc["STATUS"] = "ACTIVE";
+
+  serializeJson(doc, output);
+  int payloadSize = output.length();
+
+  sendATCommand("AT+QMTPUBEX=0,1,1,0,\"AWS/CIER/INFO/1\"," + String(payloadSize));
+  delay(500);
+  sendATCommand(output);
+  delay(2000);
+  receiveATCommand(0);
+}
+
 void receiveATCommand(int flag)
 {
-  //flag=0 means Net configuration mode
+  // flag=0 means Net configuration mode
   if (flag == 0)
   {
   retry:
@@ -126,7 +224,61 @@ void receiveATCommand(int flag)
     }
   }
 
-  //flag=2 means AWS configuration mode
+  // flag=1 means permanent receive mode
+  else if (flag == 1)
+  {
+    if (LTE_Serial.available())
+    {
+      String response2 = LTE_Serial.readString();
+      Serial.print("Response: ");
+      Serial.println(response2);
+      Serial.println("");
+
+      const char *jsonString = parseResponse(response2.c_str());
+      String songName = processJsonMessage(jsonString);
+
+      if (songName == "1")
+      {
+        mainFlag = 1;
+        audio.connecttoFS(SD, "/EARTHQUAKE.mp3");
+        vibrate(VibraMotor, 2000);
+      }
+      if (songName == "2")
+      {
+        mainFlag = 1;
+        audio.connecttoFS(SD, "/FLOOD.mp3");
+        vibrate(VibraMotor, 2000);
+      }
+      if (songName == "3")
+      {
+        mainFlag = 1;
+        audio.connecttoFS(SD, "/LANDSLIDE.mp3");
+        vibrate(VibraMotor, 2000);
+      }
+      if (songName == "4")
+      {
+        mainFlag = 1;
+        audio.connecttoFS(SD, "/LIGHTENINGSTRIKE.mp3");
+        vibrate(VibraMotor, 2000);
+      }
+      if (songName == "5")
+      {
+        mainFlag = 1;
+        audio.connecttoFS(SD, "/THUNDERSTORM.mp3");
+        vibrate(VibraMotor, 2000);
+      }
+      if (songName == "LOC")
+      {
+        checkLOC();
+      }
+      if (songName == "STATUS")
+      {
+        Publish_LIVE_NOW();
+      }
+    }
+  }
+
+  // flag=2 means AWS configuration mode
   else if (flag == 2)
   {
     if (LTE_Serial.available())
@@ -140,27 +292,31 @@ void receiveATCommand(int flag)
       {
         ESP.restart();
       }
+      if (response2.indexOf("+QMTSUB: 0,1,0,1") != -1)
+      {
+        Serial.println("Received the desired message!");
+      }
+      else
+      {
+        // If no data is received, print "retry"
+        Serial.println("retry");
+        delay(1000); // Adjust delay as needed
+      }
     }
   }
 
-  //flag=1 means permanent receive mode
-  else if (flag == 1)
+  //publishing GPS location
+  else if (flag == 3)
   {
-
     if (LTE_Serial.available())
     {
-      if (LTE_Serial.available())
-      {
-        String response2 = LTE_Serial.readString();
-        Serial.print("Response: ");
-        Serial.println(response2);
-        Serial.println("");
+      String response2 = LTE_Serial.readString();
+      Serial.print("Response: ");
+      Serial.println(response2);
+      Serial.println("");
 
-        const char *jsonString = parseResponse(response2.c_str());
-        String songName = processJsonMessage(jsonString);
-
-        playFile(songName.c_str(), 60000);
-      }
+      const char *jsonString = parseLOCResponse(response2.c_str());
+      Publish_Message(jsonString);
     }
   }
 }
@@ -204,6 +360,46 @@ void connectToNet()
   receiveATCommand(0);
   delay(500);
   sendATCommand("AT+QIACT?");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+}
+
+void connectToGPS()
+{
+  sendATCommand("AT+QGPSCFG=\"nmeasrc\",1");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"gpsnmeatype\"=2");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"glonassnmeatype\",0");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"galileonmeatype\",0");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"beidounmeatype\",0");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"gnssnmeatype\",2");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"gnssconfig\",0");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"autogps\",0");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
+  sendATCommand("AT+QGPSCFG=\"gnssconfig\",0");
   delay(1000);
   receiveATCommand(0);
   delay(500);
@@ -255,61 +451,79 @@ void connectToAWS()
   delay(5000);
   receiveATCommand(2);
   delay(500);
-  sendATCommand("AT+QMTSUB=0,1,\"adit/DisasterAlertPrototype\",1");
+  sendATCommand("AT+QMTSUB=0,1,\"AWS/CIER/SUB/1\",1");
   delay(5000);
   receiveATCommand(2);
   delay(500);
   Serial.println("Entering into Receive state permanantly.....");
-  playFile("/Anime powerup.m4r", 5000);
+
+  Publish_LIVE_NOW();
+  vibrate(OnboardLED, 2000);
+
+  // playFile("/Anime powerup.m4r", 5000);
 }
 
 void setup()
 {
-  Serial.begin(115200);
+  // Set microSD Card CS as OUTPUT and set HIGH
+  Serial.begin(9600);
   LTE_Serial.begin(115200, SERIAL_8N1, EC_RX, EC_TX);
   pinMode(33, OUTPUT);
+  pinMode(VibraMotor, OUTPUT);
+  pinMode(UserSwitch, INPUT);
+  pinMode(OnboardLED, OUTPUT);
   digitalWrite(33, HIGH);
   delay(1000);
   digitalWrite(33, LOW);
   delay(500);
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
+
+  // Initialize SPI bus for microSD Card
   SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-  SD.begin(SD_CS);
+
+  // Start microSD Card
+  if (!SD.begin(SD_CS))
+  {
+    Serial.println("Error accessing microSD card!");
+    while (true)
+      ;
+  }
+
+  // Setup I2S
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  audio.setVolume(30);
 
+  // Set Volume
+  audio.setVolume(21);
+
+  // Open music file
   connectToNet();
+  connectToGPS();
   connectToAWS();
-}
-
-int toPlayOrNotPlay()
-{
-  if (audioStartTime != 0 && (millis() - audioStartTime) <= audioDuration)
-  {
-    String trash = LTE_Serial.readString();
-    LTE_Serial.flush();
-    return 1;
-  }
-  else
-  {
-    audioStartTime = 0;
-    audioDuration = 0;
-    audio.stopSong();
-    return 0;
-  }
 }
 
 void loop()
 {
-
-  mainFlag = toPlayOrNotPlay();
   if (mainFlag == 0)
   {
     receiveATCommand(1);
   }
   else if (mainFlag == 1)
   {
+    String trash = LTE_Serial.readString();
+    LTE_Serial.flush();
     audio.loop();
   }
+
+  buttonState = digitalRead(UserSwitch);
+
+  if (mainFlag == 1 && buttonState == LOW && lastButtonState == HIGH)
+  {
+    Serial.println("BUTTON STOP");
+    audio.stopSong();
+    digitalWrite(VibraMotor, LOW);
+    mainFlag = 0;
+    checkLOC();
+  }
+  lastButtonState = buttonState;
 }
