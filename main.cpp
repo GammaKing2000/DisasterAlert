@@ -35,15 +35,13 @@ unsigned int mainFlag = 0;
 unsigned long flagChangeTime = 0;
 
 unsigned long previousMillis = 0;
-const long interval = 1000; // Interval in milliseconds (1 second)
+const long interval = 1000;
 
-int buttonState = HIGH;     // the current reading from the input pin
-int lastButtonState = HIGH; // the previous reading from the input pin
-int buttonCount = 0;        // counter for the number of button presses
+int buttonState = HIGH;
+int lastButtonState = HIGH;
 char findJson[400];
 
 void receiveATCommand(int flag);
-void playFile(const char *filename, unsigned long duration);
 void sendATCommand(String command);
 
 void vibrate(uint8_t pin, long interval)
@@ -68,7 +66,7 @@ void sendATCommand(String command)
 {
   Serial.print("Query:    ");
   Serial.println(command);
-  LTE_Serial.println(command); // Send AT command
+  LTE_Serial.println(command);
 }
 
 const char *parseResponse(const char *response)
@@ -87,7 +85,7 @@ const char *parseResponse(const char *response)
 
 const char *parseLOCResponse(const char *response)
 {
-  const char *jsonStart = strchr(response, ':') + 1;
+  const char *jsonStart = strchr(response, ',') + 1;
 
   if (jsonStart)
   {
@@ -140,7 +138,7 @@ void checkLOC()
   receiveATCommand(0);
   delay(500);
   sendATCommand("AT+QGPSLOC=0");
-  delay(1000);
+  delay(2000);
   receiveATCommand(3);
   delay(500);
   sendATCommand("AT+QGPSEND");
@@ -151,13 +149,13 @@ void checkLOC()
 
 void Publish_Message(const char *jsonString)
 {
-  String output="";
+  String output = "";
   StaticJsonDocument<96> doc;
   //          <UTC time> <ddmm.mmmm>  <ddmm,mmmm> <HDOP> <altitude>                  <date>
   //+QGPSLOC: 061951.000, 3150.7223N, 11711.9293E, 0.7,    62.2,   2,000.00,0.0,0.0, 110513, 09
   String Lat = "";
   String Long = "";
-  
+
   while (*jsonString != ',')
   {
     Lat = Lat + *jsonString;
@@ -175,7 +173,6 @@ void Publish_Message(const char *jsonString)
 
   serializeJson(doc, output);
   int payloadSize = output.length();
-
   sendATCommand("AT+QMTPUBEX=0,1,1,0,\"AWS/CIER/INFO/1\"," + String(payloadSize));
   delay(500);
   sendATCommand(output);
@@ -298,7 +295,6 @@ void receiveATCommand(int flag)
       }
       else
       {
-        // If no data is received, print "retry"
         Serial.println("retry");
         delay(1000); // Adjust delay as needed
       }
@@ -314,7 +310,6 @@ void receiveATCommand(int flag)
       Serial.print("Response: ");
       Serial.println(response2);
       Serial.println("");
-
       const char *jsonString = parseLOCResponse(response2.c_str());
       Publish_Message(jsonString);
     }
@@ -459,13 +454,10 @@ void connectToAWS()
 
   Publish_LIVE_NOW();
   vibrate(OnboardLED, 2000);
-
-  // playFile("/Anime powerup.m4r", 5000);
 }
 
 void setup()
 {
-  // Set microSD Card CS as OUTPUT and set HIGH
   Serial.begin(9600);
   LTE_Serial.begin(115200, SERIAL_8N1, EC_RX, EC_TX);
   pinMode(33, OUTPUT);
@@ -479,10 +471,8 @@ void setup()
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
 
-  // Initialize SPI bus for microSD Card
   SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
 
-  // Start microSD Card
   if (!SD.begin(SD_CS))
   {
     Serial.println("Error accessing microSD card!");
@@ -490,13 +480,10 @@ void setup()
       ;
   }
 
-  // Setup I2S
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
 
-  // Set Volume
   audio.setVolume(21);
-
-  // Open music file
+  
   connectToNet();
   connectToGPS();
   connectToAWS();
