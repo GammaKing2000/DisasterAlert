@@ -362,11 +362,15 @@ void connectToNet()
 
 void connectToGPS()
 {
+  sendATCommand("AT+QGPSCFG=\"outport\",\"usbnmea\"");
+  delay(1000);
+  receiveATCommand(0);
+  delay(500);
   sendATCommand("AT+QGPSCFG=\"nmeasrc\",1");
   delay(1000);
   receiveATCommand(0);
   delay(500);
-  sendATCommand("AT+QGPSCFG=\"gpsnmeatype\"=2");
+  sendATCommand("AT+QGPSCFG=\"gpsnmeatype\",2");
   delay(1000);
   receiveATCommand(0);
   delay(500);
